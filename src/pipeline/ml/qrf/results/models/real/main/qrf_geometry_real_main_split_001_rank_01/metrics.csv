@@ -1,0 +1,2 @@
+geometry_source,geometry_path,target_axis,target_column,split_index,split_name,qrf_rank,qrf_score,split_selection_mode,split_rank_column,split_score_column,train_rows,test_rows,train_experiments,test_experiments,coverage_percent,rmse,mae,mean_interval_width
+real,/Users/soroureskandari/Master Thesis /tube-bending-geometry/data/processed/geometry.csv,main,Main-axis [mm],1,Collet boost=0.85,1,0.3378764899725407,best_rank,qrf_rank_main,qrf_score_main,9580,4983,207,108,89.68492875777643,0.3837862270386532,0.3042045590800539,0.9012738773291433

@@ -1,0 +1,2 @@
+geometry_source,geometry_path,target_axis,target_column,split_index,split_name,qrf_rank,qrf_score,split_selection_mode,split_rank_column,split_score_column,train_rows,test_rows,train_experiments,test_experiments,coverage_percent,rmse,mae,mean_interval_width
+real,/Users/soroureskandari/Master Thesis /tube-bending-geometry/data/processed/geometry.csv,secondary,Secondary-axis [mm],8,Mandrel retraction timing=2,1,0.10379620968556215,best_rank,qrf_rank_secondary,qrf_score_secondary,9778,4785,211,104,91.84952978056427,0.10764919845519362,0.07798140374212259,0.32171530262821607
