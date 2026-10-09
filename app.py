@@ -34,9 +34,9 @@ QRF_ROOT = ROOT / "src" / "pipeline" / "ml" / "qrf" / "results" / "models"
 HGP_ROOT = ROOT / "src" / "pipeline" / "ml" / "hgp" / "results" / "models"
 GEOMETRY_PATH = DATA / "processed" / "geometry.csv"
 SETUP_PATH = DATA / "processed" / "processed_bending_setup.csv"
-MACHINE_PATH = DATA / "processed" / "machine.csv"
-MOVEMENT_PATH = DATA / "processed" / "movement.csv"
-SENSOR_PATH = DATA / "processed" / "sensor.csv"
+MACHINE_PATH = DATA / "processed" / "machine.parquet"
+MOVEMENT_PATH = DATA / "processed" / "movement.parquet"
+SENSOR_PATH = DATA / "processed" / "sensor.parquet"
 RF_RESULTS_PATH = DATA / "rf_augmented" / "final_model_results_raw.parquet"
 SK_PREDICTIONS_PATH = ROOT / "src" / "pipeline" / "ml" / "sk" / "result" / "sk_prediction_details.csv"
 SK_METRICS_PATH = ROOT / "src" / "pipeline" / "ml" / "sk" / "result" / "sk_global_metrics.csv"
@@ -195,7 +195,7 @@ def load_base_data() -> dict[str, pd.DataFrame]:
 
 @st.cache_data(show_spinner=False)
 def load_signal(path: str, experiment_id: int, max_rows: int = 5000) -> pd.DataFrame:
-    df = read_csv(path)
+    df = read_parquet(path)
     df = df[df[EXPERIMENT_COL].astype(int).eq(int(experiment_id))].copy()
     if len(df) > max_rows:
         step = int(np.ceil(len(df) / max_rows))

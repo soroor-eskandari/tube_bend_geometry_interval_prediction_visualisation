@@ -1,0 +1,6 @@
+data/processed/machine.csv
+data/processed/movement.csv
+data/processed/sensor.csv
+
+__pycache__/
+*.py[cod]
