@@ -32,14 +32,14 @@ ROOT = Path(__file__).resolve().parent
 DATA = ROOT / "data"
 QRF_ROOT = ROOT / "src" / "pipeline" / "ml" / "qrf" / "results" / "models"
 HGP_ROOT = ROOT / "src" / "pipeline" / "ml" / "hgp" / "results" / "models"
-GEOMETRY_PATH = DATA / "processed" / "geometry.csv"
-SETUP_PATH = DATA / "processed" / "processed_bending_setup.csv"
+GEOMETRY_PATH = DATA / "processed" / "geometry.parquet"
+SETUP_PATH = DATA / "processed" / "processed_bending_setup.parquet"
 MACHINE_PATH = DATA / "processed" / "machine.parquet"
 MOVEMENT_PATH = DATA / "processed" / "movement.parquet"
 SENSOR_PATH = DATA / "processed" / "sensor.parquet"
 RF_RESULTS_PATH = DATA / "rf_augmented" / "final_model_results_raw.parquet"
-SK_PREDICTIONS_PATH = ROOT / "src" / "pipeline" / "ml" / "sk" / "result" / "sk_prediction_details.csv"
-SK_METRICS_PATH = ROOT / "src" / "pipeline" / "ml" / "sk" / "result" / "sk_global_metrics.csv"
+SK_PREDICTIONS_PATH = ROOT / "src" / "pipeline" / "ml" / "sk" / "result" / "sk_prediction_details.parquet"
+SK_METRICS_PATH = ROOT / "src" / "pipeline" / "ml" / "sk" / "result" / "sk_global_metrics.parquet"
 BENDING_RANKING_PATH = (
     ROOT / "src" / "pipeline" / "ml" / "qrf" / "data" / "bending_setup_group_spread_feature_ranking.parquet"
 )
@@ -176,19 +176,14 @@ def inject_css() -> None:
 
 
 @st.cache_data(show_spinner=False)
-def read_csv(path: str, **kwargs: Any) -> pd.DataFrame:
-    return pd.read_csv(path, **kwargs)
-
-
-@st.cache_data(show_spinner=False)
 def read_parquet(path: str, **kwargs: Any) -> pd.DataFrame:
     return pd.read_parquet(path, **kwargs)
 
 
 @st.cache_data(show_spinner="Loading thesis datasets...")
 def load_base_data() -> dict[str, pd.DataFrame]:
-    geometry = read_csv(str(GEOMETRY_PATH))
-    setup = read_csv(str(SETUP_PATH))
+    geometry = read_parquet(str(GEOMETRY_PATH))
+    setup = read_parquet(str(SETUP_PATH))
     observed = attach_groups(geometry, setup)
     return {"geometry": geometry, "setup": setup, "observed": observed}
 
@@ -220,12 +215,12 @@ def load_rf_results() -> pd.DataFrame:
 
 @st.cache_data(show_spinner=False)
 def load_sk_predictions() -> pd.DataFrame:
-    return read_csv(str(SK_PREDICTIONS_PATH)) if SK_PREDICTIONS_PATH.exists() else pd.DataFrame()
+    return read_parquet(str(SK_PREDICTIONS_PATH)) if SK_PREDICTIONS_PATH.exists() else pd.DataFrame()
 
 
 @st.cache_data(show_spinner=False)
 def load_sk_metrics() -> pd.DataFrame:
-    return read_csv(str(SK_METRICS_PATH)) if SK_METRICS_PATH.exists() else pd.DataFrame()
+    return read_parquet(str(SK_METRICS_PATH)) if SK_METRICS_PATH.exists() else pd.DataFrame()
 
 
 @st.cache_data(show_spinner=False)
@@ -249,7 +244,7 @@ def hgp_run_dir(source: str, axis_key: str) -> Path:
 
 @st.cache_data(show_spinner=False)
 def load_prediction_file(path: str) -> pd.DataFrame:
-    pred = read_csv(path)
+    pred = read_parquet(path)
     if "y_median" not in pred.columns and "y_mean" in pred.columns:
         pred = pred.rename(columns={"y_mean": "y_median"})
     return pred
@@ -257,15 +252,15 @@ def load_prediction_file(path: str) -> pd.DataFrame:
 
 @st.cache_data(show_spinner=False)
 def load_metric_file(path: str) -> pd.DataFrame:
-    return read_csv(path)
+    return read_parquet(path)
 
 
 def prediction_and_metrics(model: str, source: str, axis_key: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     run_dir = qrf_run_dir(source, axis_key) if model == "QRF" else hgp_run_dir(source, axis_key)
     if run_dir is None or not run_dir.exists():
         return pd.DataFrame(), pd.DataFrame()
-    pred_path = run_dir / "test_predictions.csv"
-    metric_path = run_dir / "metrics.csv"
+    pred_path = run_dir / "test_predictions.parquet"
+    metric_path = run_dir / "metrics.parquet"
     pred = load_prediction_file(str(pred_path)) if pred_path.exists() else pd.DataFrame()
     metrics = load_metric_file(str(metric_path)) if metric_path.exists() else pd.DataFrame()
     return pred, metrics
