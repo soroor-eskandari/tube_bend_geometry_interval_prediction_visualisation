@@ -1,754 +1,661 @@
+"""TubeBEND thesis dashboard.
+
+Uncertainty-aware prediction intervals for rotary draw bending geometry.
+Single-file Streamlit app: run with `streamlit run app.py`.
+"""
+
 from __future__ import annotations
 
-import json
+import ast
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 import pandas as pd
-import plotly.express as px
 import plotly.graph_objects as go
+import plotly.io as pio
 import streamlit as st
-import streamlit.components.v1 as components
+from plotly.subplots import make_subplots
 
-from src.dashboard_core import (
-    ANGLE_COL,
-    EXPERIMENT_COL,
-    GROUP_COL,
-    MAIN_AXIS,
-    SECONDARY_AXIS,
-    attach_groups,
-    axis_column,
-    axis_label,
-    geometry_summary,
-    group_experiments,
-    mean_pairwise_curve_distance,
-    prediction_summary,
-    variability_by_group,
-)
-
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
 
 ROOT = Path(__file__).resolve().parent
 DATA = ROOT / "data"
-QRF_ROOT = ROOT / "src" / "pipeline" / "ml" / "qrf" / "results" / "models"
-HGP_ROOT = ROOT / "src" / "pipeline" / "ml" / "hgp" / "results" / "models"
-GEOMETRY_PATH = DATA / "processed" / "geometry.parquet"
-SETUP_PATH = DATA / "processed" / "processed_bending_setup.parquet"
-MACHINE_PATH = DATA / "processed" / "machine.parquet"
-MOVEMENT_PATH = DATA / "processed" / "movement.parquet"
-SENSOR_PATH = DATA / "processed" / "sensor.parquet"
-RF_RESULTS_PATH = DATA / "rf_augmented" / "final_model_results_raw.parquet"
-SK_PREDICTIONS_PATH = ROOT / "src" / "pipeline" / "ml" / "sk" / "result" / "sk_prediction_details.parquet"
-SK_METRICS_PATH = ROOT / "src" / "pipeline" / "ml" / "sk" / "result" / "sk_global_metrics.parquet"
-BENDING_RANKING_PATH = (
-    ROOT / "src" / "pipeline" / "ml" / "qrf" / "data" / "bending_setup_group_spread_feature_ranking.parquet"
-)
-MAX_ANGLE = 44
+ML = ROOT / "src" / "pipeline" / "ml"
 
-SOURCE_LABELS = {
-    "real": "Real experimental data",
-    "sensor_augmented_noise__time_wrapping__scaling__jittering": "Sensor-based augmentation",
-    "within_group_interpolation_raw": "Within-group interpolation",
+ANGLE = "Angle[degree]ORDistance[mm]"
+GROUP = "Group_ID"
+EXP = "Experiment_ID"
+MAIN = "Main-axis [mm]"
+SECONDARY = "Secondary-axis [mm]"
+MAX_ANGLE = 44
+SYNTHETIC_ID_START = 1_000_000  # generated experiments get IDs >= this
+NOMINAL = 90.0
+
+AXES = {
+    "Main axis": {"key": "main", "col": MAIN, "split": 1, "held_out": "Collet boost = 0.85"},
+    "Secondary axis": {"key": "secondary", "col": SECONDARY, "split": 8, "held_out": "Mandrel retraction timing = 2"},
 }
-SOURCE_PATHS = {
-    "sensor_augmented_noise__time_wrapping__scaling__jittering": DATA
-    / "rf_augmented"
-    / "final_geometry_sensor_augmented_noise__time_wrapping__scaling__jittering.parquet",
-    "within_group_interpolation_raw": DATA
-    / "rf_augmented"
-    / "final_geometry_within_group_interpolation_raw.parquet",
+SENSOR_KEY = "sensor_augmented_noise__time_wrapping__scaling__jittering"
+INTERP_KEY = "within_group_interpolation_raw"
+SOURCES = {
+    "real": {"label": "Real data", "color": "#334155"},
+    INTERP_KEY: {"label": "Within-group interpolation", "color": "#0d9488"},
+    SENSOR_KEY: {"label": "Sensor augmentation", "color": "#7c3aed"},
 }
-RANK_ONE_SPLIT = {"main": 1, "secondary": 8}
-AXIS_OPTIONS = {"Main": "main", "Secondary": "secondary"}
-PROCESS_PARAMETERS = [
+MODELS = {
+    "QRF": {"label": "Quantile Regression Forest", "color": "#2563eb", "symbol": "circle"},
+    "HGP": {"label": "Heteroscedastic Gaussian Process", "color": "#ea580c", "symbol": "diamond"},
+}
+MEASURED = "#0f172a"
+
+PARAMETERS = [
     "Collet boost",
     "Pressure-die distance",
     "Mandrel retraction timing",
     "Pressure-die boost",
     "Clamp-die lateral position",
     "Mandrel position",
-    "Pressure-die lateral position",
 ]
-METRIC_LABELS = {
-    "coverage_percent": "Coverage [%]",
-    "coverage_error_percent": "Calibration error [%]",
-    "mean_interval_width": "Mean interval width [mm]",
-    "mae": "MAE [mm]",
-    "rmse": "RMSE [mm]",
-    "r2": "R2",
-    "interval_score": "Interval score",
-    "negative_log_predictive_density": "NLPD",
+# Thesis Table 4.20 (held-out permutation importance) and Table 4.21 (adjusted direction).
+VARIABILITY_RANKING = {
+    "main": {
+        "Collet boost": 0.028675,
+        "Pressure-die distance": 0.023374,
+        "Mandrel retraction timing": 0.004738,
+        "Pressure-die boost": 0.002199,
+        "Clamp-die lateral position": 0.000592,
+        "Mandrel position": -0.000102,
+    },
+    "secondary": {
+        "Pressure-die distance": 0.029940,
+        "Collet boost": 0.004572,
+        "Mandrel retraction timing": 0.001579,
+        "Mandrel position": 0.000982,
+        "Clamp-die lateral position": -0.000318,
+        "Pressure-die boost": -0.000342,
+    },
+}
+VARIABILITY_DIRECTION = {
+    "main": {
+        "Collet boost": "positive",
+        "Pressure-die distance": "approximately neutral",
+        "Mandrel retraction timing": "negative",
+        "Pressure-die boost": "weak positive",
+        "Clamp-die lateral position": "positive",
+        "Mandrel position": "negative",
+    },
+    "secondary": {
+        "Collet boost": "negative",
+        "Pressure-die distance": "positive",
+        "Mandrel retraction timing": "positive",
+        "Pressure-die boost": "approximately neutral",
+        "Clamp-die lateral position": "negative",
+        "Mandrel position": "negative",
+    },
+}
+# The twelve process signals used as model inputs (thesis Fig. 3.8).
+SIGNALS = {
+    "machine": {
+        "MACHINE_BEND-DIE_LATERAL_Max_Torque_[%]": "Bend-die lateral torque [%]",
+        "MACHINE_BEND-DIE_ROTATING_Max_Torque_[%]": "Bend-die rotating torque [%]",
+        "MACHINE_CLAMP-DIE_LATERAL_Max_Torque_[%]": "Clamp-die lateral torque [%]",
+        "MACHINE_COLLET_AXIAL_Max_Torque_[%]": "Collet axial torque [%]",
+        "MACHINE_MANDREL_AXIAL_Max_Torque_[%]": "Mandrel axial torque [%]",
+        "MACHINE_PRESSURE-DIE_LATERAL_Max_Torque_[%]": "Pressure-die lateral torque [%]",
+    },
+    "movement": {
+        "BEND-DIE_ROTATING_Angle_[°]": "Bend-die angle [°]",
+        "BEND-DIE_LATERAL_Movement_[mm]": "Bend-die lateral [mm]",
+        "CLAMP-DIE_LATERAL_Movement_[mm]": "Clamp-die lateral [mm]",
+        "COLLET_AXIAL_Movement_[mm]": "Collet axial [mm]",
+        "MANDREL_AXIAL_Movement_[mm]": "Mandrel axial [mm]",
+        "PRESSURE-DIE_AXIAL_Movement_[mm]": "Pressure-die axial [mm]",
+    },
 }
 
+# ---------------------------------------------------------------------------
+# Page setup and styling
+# ---------------------------------------------------------------------------
 
 st.set_page_config(
-    page_title="TubeBEND Thesis Dashboard",
-    page_icon="",
+    page_title="TubeBEND · Prediction Intervals",
+    page_icon="📐",
     layout="wide",
+    initial_sidebar_state="collapsed",
 )
 
-
-def inject_css() -> None:
-    st.markdown(
-        """
-        <style>
-        :root {
-          --tb-blue: #2563eb;
-          --tb-navy: #102033;
-          --tb-muted: #64748b;
-          --tb-border: #dbe5f0;
-          --tb-bg: #f6f8fb;
-        }
-        .stApp { background: var(--tb-bg); color: var(--tb-navy); }
-        section[data-testid="stSidebar"] { background: #ffffff; border-right: 1px solid var(--tb-border); }
-        .main-title {
-          font-size: 2.25rem; line-height: 1.12; font-weight: 760; color: var(--tb-navy);
-          margin: 0.15rem 0 0.25rem;
-        }
-        .subtitle { color: var(--tb-muted); font-size: 1.02rem; margin-bottom: 1rem; }
-        .card {
-          background: #fff; border: 1px solid var(--tb-border); border-radius: 10px;
-          padding: 1rem 1.05rem; box-shadow: 0 8px 28px rgba(15, 23, 42, 0.045);
-          min-height: 100%;
-        }
-        .metric-card {
-          background: #fff; border: 1px solid var(--tb-border); border-radius: 8px;
-          padding: 0.8rem 0.9rem; min-height: 86px;
-        }
-        .metric-card .value { font-weight: 760; font-size: 1.45rem; color: var(--tb-blue); }
-        .metric-card .label { color: var(--tb-muted); font-size: 0.86rem; }
-        .accordion-head {
-          background: #fff; border: 1px solid var(--tb-border); border-radius: 10px;
-          padding: 0.8rem 0.9rem; margin: 0.42rem 0 0.1rem;
-        }
-        .step-dot {
-          display: inline-flex; align-items: center; justify-content: center;
-          width: 30px; height: 30px; border-radius: 999px; background: var(--tb-blue);
-          color: #fff; font-weight: 720; margin-right: 0.65rem;
-        }
-        .step-title { font-weight: 720; color: var(--tb-navy); font-size: 1.03rem; }
-        .step-desc { color: var(--tb-muted); font-size: 0.88rem; margin-left: 2.55rem; }
-        div[data-testid="stButton"] > button {
-          border-radius: 8px; border: 1px solid var(--tb-border);
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
+pio.templates["thesis"] = go.layout.Template(
+    layout=dict(
+        font=dict(family="Inter, -apple-system, Segoe UI, sans-serif", size=13, color="#334155"),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        xaxis=dict(gridcolor="#e2e8f0", zeroline=False, linecolor="#cbd5e1", ticks=""),
+        yaxis=dict(gridcolor="#e2e8f0", zeroline=False, linecolor="#cbd5e1", ticks=""),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0, bgcolor="rgba(0,0,0,0)"),
+        hoverlabel=dict(bgcolor="white", font_size=12),
+        margin=dict(l=8, r=8, t=48, b=8),
     )
-    components.html(
-        """
-        <script>
-        const doc = window.parent.document;
-        const allowedKeys = new Set([
-          "Tab", "Escape", "Enter", "ArrowUp", "ArrowDown",
-          "ArrowLeft", "ArrowRight", "Home", "End"
-        ]);
+)
+pio.templates.default = "plotly_white+thesis"
+PLOT_CONFIG = {"displayModeBar": False}
 
-        function lockSelectboxInputs() {
-          doc.querySelectorAll('div[data-baseweb="select"] input').forEach((input) => {
-            input.readOnly = true;
-            input.setAttribute("inputmode", "none");
-            input.setAttribute("autocomplete", "off");
+st.markdown(
+    """
+    <style>
+    .block-container { padding-top: 3.5rem; padding-bottom: 3rem; max-width: 1400px; }
+    .tb-title { font-size: 1.9rem; font-weight: 700; line-height: 1.15; color: #0f172a; margin: 0; }
+    .tb-sub { color: #64748b; font-size: 0.98rem; margin-top: 0.35rem; }
+    .stTabs [data-baseweb="tab-list"] { gap: 1.5rem; }
+    .stTabs [data-baseweb="tab"] { font-weight: 600; }
+    div[data-testid="stMetricValue"] { font-size: 1.55rem; }
+    .stTabs [aria-selected="true"] { color: #2563eb !important; }
+    .stTabs [data-baseweb="tab-highlight"] { background-color: #2563eb !important; }
+    button[kind="segmented_controlActive"], button[kind="pillsActive"] {
+        background: #eff6ff !important; border-color: #2563eb !important; color: #1d4ed8 !important; }
+    .tb-kpi { border: 1px solid #e2e8f0; border-radius: 10px; padding: .8rem 1rem; background: #fff; height: 100%; }
+    .tb-kpi .v { font-size: 1.6rem; font-weight: 700; color: #0f172a; line-height: 1.2; }
+    .tb-kpi .l { font-size: .82rem; color: #64748b; margin-bottom: .2rem; }
+    .tb-kpi .n { font-size: .8rem; color: #94a3b8; margin-top: .15rem; }
+    .tb-kpi .n.good { color: #b91c1c; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
-            if (input.dataset.selectionOnly === "true") {
-              return;
-            }
-            input.dataset.selectionOnly = "true";
-            input.addEventListener("keydown", (event) => {
-              if (!allowedKeys.has(event.key)) {
-                event.preventDefault();
-              }
-            }, true);
-            input.addEventListener("beforeinput", (event) => event.preventDefault(), true);
-            input.addEventListener("paste", (event) => event.preventDefault(), true);
-          });
-        }
+# ---------------------------------------------------------------------------
+# Data loading (all cached)
+# ---------------------------------------------------------------------------
 
-        lockSelectboxInputs();
-        new MutationObserver(lockSelectboxInputs).observe(doc.body, {
-          childList: true,
-          subtree: true
-        });
-        </script>
-        """,
-        height=0,
-    )
+
+def parse_ids(value: object) -> list[int]:
+    if isinstance(value, str):
+        value = ast.literal_eval(value)
+    return [int(v) for v in value] if value is not None else []
 
 
 @st.cache_data(show_spinner=False)
-def read_parquet(path: str, **kwargs: Any) -> pd.DataFrame:
-    return pd.read_parquet(path, **kwargs)
-
-
-@st.cache_data(show_spinner="Loading thesis datasets...")
-def load_base_data() -> dict[str, pd.DataFrame]:
-    geometry = read_parquet(str(GEOMETRY_PATH))
-    setup = read_parquet(str(SETUP_PATH))
-    observed = attach_groups(geometry, setup)
-    return {"geometry": geometry, "setup": setup, "observed": observed}
+def load_setup() -> pd.DataFrame:
+    setup = pd.read_parquet(DATA / "processed" / "processed_bending_setup.parquet")
+    setup[GROUP] = setup[GROUP].astype(int)
+    setup["experiments"] = setup["Experiment_Number"].map(parse_ids)
+    return setup
 
 
 @st.cache_data(show_spinner=False)
-def load_signal(path: str, experiment_id: int, max_rows: int = 5000) -> pd.DataFrame:
-    df = read_parquet(path)
-    df = df[df[EXPERIMENT_COL].astype(int).eq(int(experiment_id))].copy()
-    if len(df) > max_rows:
-        step = int(np.ceil(len(df) / max_rows))
-        df = df.iloc[::step].copy()
-    return df
-
-
-@st.cache_data(show_spinner=False)
-def load_augmented(source: str) -> pd.DataFrame:
+def load_geometry(source: str) -> pd.DataFrame:
+    """Geometry profiles with columns EXP, GROUP, ANGLE, MAIN, SECONDARY, synthetic."""
     if source == "real":
-        base = load_base_data()["observed"].copy()
-        base["Synthetic"] = False
-        base["group_id"] = base[GROUP_COL]
-        return base
-    return read_parquet(str(SOURCE_PATHS[source]))
+        geometry = pd.read_parquet(DATA / "processed" / "geometry.parquet")
+        mapping = load_setup()[[GROUP, "experiments"]].explode("experiments")
+        mapping = mapping.rename(columns={"experiments": EXP}).astype({EXP: int})
+        df = geometry.merge(mapping, on=EXP, how="inner")
+        df["synthetic"] = False
+    else:
+        df = pd.read_parquet(DATA / "rf_augmented" / f"final_geometry_{source}.parquet")
+        df = df.rename(columns={"group_id": GROUP, "Synthetic": "synthetic"})
+    df = df[[EXP, GROUP, ANGLE, MAIN, SECONDARY, "synthetic"]].copy()
+    df[GROUP] = df[GROUP].astype(int)
+    df["synthetic"] = df["synthetic"].astype(bool)
+    return df[df[ANGLE].between(0, MAX_ANGLE)]
+
+
+def prediction_dir(model: str, source: str, axis_key: str, split: int) -> Path:
+    if model == "HGP":
+        return ML / "hgp" / "results" / "models" / source / axis_key
+    root = ML / "qrf" / "results" / "models" / source / axis_key
+    matches = sorted(root.glob(f"qrf_geometry_{source}_{axis_key}_split_{split:03d}_rank_*"))
+    return matches[0] if matches else root
 
 
 @st.cache_data(show_spinner=False)
-def load_rf_results() -> pd.DataFrame:
-    return read_parquet(str(RF_RESULTS_PATH)) if RF_RESULTS_PATH.exists() else pd.DataFrame()
+def load_predictions(model: str, source: str, axis_key: str, split: int) -> pd.DataFrame:
+    path = prediction_dir(model, source, axis_key, split) / "test_predictions.parquet"
+    if not path.exists():
+        return pd.DataFrame()
+    pred = pd.read_parquet(path)
+    pred["y_center"] = pred["y_median"] if "y_median" in pred else pred["y_mean"]
+    pred[GROUP] = pred[GROUP].astype(int)
+    return pred[pred[ANGLE].between(0, MAX_ANGLE)]
+
+
+def interval_score(y: pd.Series, lo: pd.Series, hi: pd.Series, alpha: float = 0.1) -> float:
+    penalty = (2 / alpha) * ((lo - y).clip(lower=0) + (y - hi).clip(lower=0))
+    return float(((hi - lo) + penalty).mean())
+
+
+def gaussian_nlpd(y: pd.Series, center: pd.Series, lo: pd.Series, hi: pd.Series) -> float:
+    """NLPD of a Gaussian approximation of a 90% interval (thesis Eq. 4.1)."""
+    sigma = ((hi - lo) / (2 * 1.64485)).clip(lower=1e-9)
+    return float((0.5 * np.log(2 * np.pi * sigma**2) + (y - center) ** 2 / (2 * sigma**2)).mean())
 
 
 @st.cache_data(show_spinner=False)
-def load_sk_predictions() -> pd.DataFrame:
-    return read_parquet(str(SK_PREDICTIONS_PATH)) if SK_PREDICTIONS_PATH.exists() else pd.DataFrame()
-
-
-@st.cache_data(show_spinner=False)
-def load_sk_metrics() -> pd.DataFrame:
-    return read_parquet(str(SK_METRICS_PATH)) if SK_METRICS_PATH.exists() else pd.DataFrame()
-
-
-@st.cache_data(show_spinner=False)
-def load_ranking() -> pd.DataFrame:
-    return read_parquet(str(BENDING_RANKING_PATH)) if BENDING_RANKING_PATH.exists() else pd.DataFrame()
-
-
-def qrf_run_dir(source: str, axis_key: str) -> Path | None:
-    split_index = RANK_ONE_SPLIT[axis_key]
-    candidates = sorted(
-        (QRF_ROOT / source / axis_key).glob(
-            f"qrf_geometry_{source}_{axis_key}_split_{split_index:03d}_rank_*"
-        )
-    )
-    return candidates[0] if candidates else None
-
-
-def hgp_run_dir(source: str, axis_key: str) -> Path:
-    return HGP_ROOT / source / axis_key
-
-
-@st.cache_data(show_spinner=False)
-def load_prediction_file(path: str) -> pd.DataFrame:
-    pred = read_parquet(path)
-    if "y_median" not in pred.columns and "y_mean" in pred.columns:
-        pred = pred.rename(columns={"y_mean": "y_median"})
-    return pred
-
-
-@st.cache_data(show_spinner=False)
-def load_metric_file(path: str) -> pd.DataFrame:
-    return read_parquet(path)
-
-
-def prediction_and_metrics(model: str, source: str, axis_key: str) -> tuple[pd.DataFrame, pd.DataFrame]:
-    run_dir = qrf_run_dir(source, axis_key) if model == "QRF" else hgp_run_dir(source, axis_key)
-    if run_dir is None or not run_dir.exists():
-        return pd.DataFrame(), pd.DataFrame()
-    pred_path = run_dir / "test_predictions.parquet"
-    metric_path = run_dir / "metrics.parquet"
-    pred = load_prediction_file(str(pred_path)) if pred_path.exists() else pd.DataFrame()
-    metrics = load_metric_file(str(metric_path)) if metric_path.exists() else pd.DataFrame()
-    return pred, metrics
-
-
-@st.cache_data(show_spinner=False)
-def collect_uncertainty_metrics() -> pd.DataFrame:
+def load_metrics() -> pd.DataFrame:
+    """One row per model x training source x axis, as reported in the thesis."""
     rows = []
-    for source in SOURCE_LABELS:
-        for axis_key in ("main", "secondary"):
-            for model in ("QRF", "HGP"):
-                _, metrics = prediction_and_metrics(model, source, axis_key)
-                if metrics.empty:
+    for axis_name, axis in AXES.items():
+        for source, source_meta in SOURCES.items():
+            for model in MODELS:
+                run = prediction_dir(model, source, axis["key"], axis["split"])
+                if not (run / "metrics.parquet").exists():
                     continue
-                row = metrics.iloc[0].to_dict()
-                row["Model"] = model
-                row["source_key"] = source
-                row["Training data"] = SOURCE_LABELS[source]
-                row["Axis"] = axis_label(axis_key)
-                rows.append(row)
+                m = pd.read_parquet(run / "metrics.parquet").iloc[0]
+                # Unclipped predictions, so derived scores match the thesis tables exactly.
+                pred = pd.read_parquet(run / "test_predictions.parquet")
+                center = pred["y_median"] if "y_median" in pred else pred["y_mean"]
+                y, lo, hi, c = pred["y_true"], pred["y_lower"], pred["y_upper"], center
+                rows.append(
+                    {
+                        "Axis": axis_name,
+                        "Model": model,
+                        "source": source,
+                        "Training data": source_meta["label"],
+                        "Coverage [%]": m["coverage_percent"],
+                        "Calibration error [pp]": abs(m["coverage_percent"] - NOMINAL),
+                        "Mean PI width [mm]": m["mean_interval_width"],
+                        "MAE [mm]": m["mae"],
+                        "RMSE [mm]": m["rmse"],
+                        "Interval score": m.get("interval_score", interval_score(y, lo, hi)),
+                        "NLPD": m.get("negative_log_predictive_density", gaussian_nlpd(y, c, lo, hi)),
+                    }
+                )
     return pd.DataFrame(rows)
 
 
-def sidebar() -> str:
-    with st.sidebar:
-        st.markdown("### TubeBEND")
-        st.caption("Thesis research dashboard")
-        return st.radio(
-            "Navigation",
-            ["Workflow", "Dataset", "Results"],
-            label_visibility="collapsed",
+@st.cache_data(show_spinner=False)
+def load_rf_summary() -> dict[str, float]:
+    path = DATA / "rf_augmented" / "final_model_results_raw.parquet"
+    if not path.exists():
+        return {}
+    row = pd.read_parquet(path).iloc[0]
+    return {k: float(row[k]) for k in ("r2_main", "r2_secondary", "test_r2_main", "test_r2_secondary")}
+
+
+@st.cache_data(show_spinner=False)
+def load_signals(experiment_id: int, max_points: int = 1200) -> pd.DataFrame:
+    frames = []
+    for name, columns in SIGNALS.items():
+        df = pd.read_parquet(
+            DATA / "processed" / f"{name}.parquet",
+            columns=[EXP, "Time_[s]", *columns],
+            filters=[(EXP, "==", int(experiment_id))],
         )
+        frames.append(df.set_index("Time_[s]").drop(columns=EXP))
+    signals = pd.concat(frames, axis=1).sort_index()
+    step = max(1, int(np.ceil(len(signals) / max_points)))
+    return signals.iloc[::step]
 
 
-def header() -> None:
-    st.markdown(
-        '<div class="main-title">Uncertainty-Aware Machine Learning for Rotary Tube Bending</div>',
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        '<div class="subtitle">Interactive visualization of the complete methodological workflow.</div>',
-        unsafe_allow_html=True,
-    )
+@st.cache_data(show_spinner=False)
+def within_group_spread(source: str, axis_col: str) -> pd.Series:
+    """Per group: pointwise std across profiles, averaged over the 45 points.
+
+    Real data uses the physical repetitions; augmented sources use only the
+    generated profiles, so the comparison isolates what augmentation adds.
+    """
+    df = load_geometry(source)
+    df = df[df["synthetic"]] if source != "real" else df
+    counts = df.groupby(GROUP)[EXP].nunique()
+    df = df[df[GROUP].isin(counts[counts >= 2].index)]
+    return df.groupby([GROUP, ANGLE])[axis_col].std().groupby(level=0).mean()
 
 
-def card(title: str, body: str) -> None:
-    st.markdown(
-        f'<div class="card"><b>{title}</b><br><span style="color:#64748b">{body}</span></div>',
-        unsafe_allow_html=True,
-    )
-
-
-def metric_card(label: str, value: str, note: str = "") -> None:
-    st.markdown(
-        f"""
-        <div class="metric-card">
-          <div class="value">{value}</div>
-          <div class="label">{label}</div>
-          <div style="color:#94a3b8;font-size:0.78rem">{note}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-def geometry_plot(df: pd.DataFrame, axis_col: str, title: str, synthetic_col: str | None = None) -> go.Figure:
-    fig = go.Figure()
-    if df.empty:
-        return fig
-    df = df[pd.to_numeric(df[ANGLE_COL], errors="coerce").between(0, MAX_ANGLE)].copy()
-    for experiment_id, part in df.groupby(EXPERIMENT_COL):
-        synthetic = bool(part[synthetic_col].iloc[0]) if synthetic_col and synthetic_col in part else False
-        fig.add_trace(
-            go.Scatter(
-                x=part[ANGLE_COL],
-                y=part[axis_col],
-                mode="lines",
-                name=("Synthetic" if synthetic else "Real") + f" {int(experiment_id)}",
-                line=dict(
-                    color="rgba(37,99,235,0.38)" if synthetic else "rgba(30,41,59,0.68)",
-                    dash="dash" if synthetic else "solid",
-                    width=1.5,
-                ),
-                legendgroup="synthetic" if synthetic else "real",
-                showlegend=False,
-            )
-        )
-    summary = geometry_summary(df, axis_col)
-    if not summary.empty:
-        fig.add_trace(
-            go.Scatter(
-                x=summary[ANGLE_COL],
-                y=summary["mean"],
-                mode="lines+markers",
-                name="Mean profile",
-                line=dict(color="#2563eb", width=3),
-            )
-        )
-    fig.update_layout(
-        title=title,
-        template="plotly_white",
-        height=430,
-        margin=dict(l=10, r=10, t=50, b=10),
-        xaxis_title="Angle or distance",
-        yaxis_title=axis_col,
-        hovermode="x unified",
-    )
-    fig.update_xaxes(range=[0, MAX_ANGLE])
-    return fig
-
-
-def signal_plot(signal_df: pd.DataFrame, channels: list[str], normalize: bool) -> go.Figure:
-    fig = go.Figure()
-    if signal_df.empty:
-        return fig
-    x = signal_df["Time_[s]"] if "Time_[s]" in signal_df else signal_df.index
-    for channel in channels:
-        y = pd.to_numeric(signal_df[channel], errors="coerce")
-        if normalize:
-            std = y.std()
-            y = (y - y.mean()) / std if pd.notna(std) and std else y - y.mean()
-        fig.add_trace(go.Scatter(x=x, y=y, mode="lines", name=channel))
-    fig.update_layout(
-        template="plotly_white",
-        height=420,
-        margin=dict(l=10, r=10, t=35, b=10),
-        xaxis_title="Time [s]",
-        yaxis_title="Normalized value" if normalize else "Native channel value",
-        hovermode="x unified",
-    )
-    return fig
-
-
-def prediction_interval_plot(pred: pd.DataFrame, model: str, title: str) -> go.Figure:
-    if not pred.empty and ANGLE_COL in pred.columns:
-        pred = pred[pd.to_numeric(pred[ANGLE_COL], errors="coerce").between(0, MAX_ANGLE)].copy()
-    summary = prediction_summary(pred)
-    fig = go.Figure()
-    if summary.empty:
-        return fig
-    x_poly = pd.concat([summary[ANGLE_COL], summary[ANGLE_COL].iloc[::-1]])
-    y_poly = pd.concat([summary["y_upper"], summary["y_lower"].iloc[::-1]])
-    fig.add_trace(
-        go.Scatter(
-            x=x_poly,
-            y=y_poly,
-            fill="toself",
-            fillcolor="rgba(37,99,235,0.16)",
-            line=dict(color="rgba(255,255,255,0)"),
-            name="Prediction interval",
-            hoverinfo="skip",
-        )
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=summary[ANGLE_COL],
-            y=summary["y_true"],
-            mode="lines+markers",
-            name="Measured geometry",
-            line=dict(color="#1f2937", width=2.5),
-        )
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=summary[ANGLE_COL],
-            y=summary["y_center"],
-            mode="lines",
-            name=f"{model} central prediction",
-            line=dict(color="#2563eb", width=3),
-        )
-    )
-    outside = summary[
-        (summary["y_true"] < summary["y_lower"]) | (summary["y_true"] > summary["y_upper"])
-    ]
-    if not outside.empty:
-        fig.add_trace(
-            go.Scatter(
-                x=outside[ANGLE_COL],
-                y=outside["y_true"],
-                mode="markers",
-                name="Outside interval",
-                marker=dict(color="#dc2626", size=7, symbol="x"),
-            )
-        )
-    fig.update_layout(
-        title=title,
-        template="plotly_white",
-        height=470,
-        margin=dict(l=10, r=10, t=52, b=10),
-        xaxis_title="Angle or distance",
-        yaxis_title=str(pred["target_column"].iloc[0]) if "target_column" in pred else "Geometry [mm]",
-        hovermode="x unified",
-    )
-    fig.update_xaxes(range=[0, MAX_ANGLE])
-    return fig
-
-
-def render_data_preparation(data: dict[str, pd.DataFrame]) -> None:
-    observed, setup = data["observed"], data["setup"]
-    tabs = st.tabs(["Overview", "Process & Sensors", "Geometry Targets"])
-    with tabs[0]:
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            card(
-                "Tube Bending Process",
-                "Rotary draw bending setup represented by process parameters such as bend die, pressure die, mandrel, collet, and clamp-die positions. PDF figure extraction is prepared as a deployment script, but no extracted schematic is committed yet.",
-            )
-        with c2:
-            card(
-                "Process Measurements",
-                "Machine torque/load channels, movement signals, and additional sensor load channels are loaded from the processed exports.",
-            )
-        with c3:
-            card(
-                "Measurement Orientations",
-                "Geometry targets are represented as Main-axis and Secondary-axis profiles sampled over 45 measurement locations.",
-            )
-        m1, m2, m3, m4, m5, m6 = st.columns(6)
-        with m1:
-            metric_card("Prepared experiments", f"{observed[EXPERIMENT_COL].nunique():,}", "valid physical experiments")
-        with m2:
-            metric_card("Bending setup groups", f"{setup[GROUP_COL].nunique():,}")
-        with m3:
-            metric_card("Geometry points", f"{observed[ANGLE_COL].nunique():,}", "per target profile")
-        with m4:
-            metric_card("Machine load channels", "10")
-        with m5:
-            metric_card("Sensor load channels", "3")
-        with m6:
-            metric_card("Movement channels", "10")
-    with tabs[1]:
-        group_id = st.selectbox("Bending setup group", sorted(setup[GROUP_COL].astype(int)), key="prep_group")
-        experiments = group_experiments(setup, int(group_id))
-        experiment_id = st.selectbox("Experiment", experiments, index=None, placeholder="Select an experiment...")
-        if experiment_id is None:
-            st.info("Select a physical experiment to load process and sensor traces.")
-        else:
-            source_kind = st.radio("Signal source", ["Machine load", "Sensor load", "Movement"], horizontal=True)
-            path = {"Machine load": MACHINE_PATH, "Sensor load": SENSOR_PATH, "Movement": MOVEMENT_PATH}[source_kind]
-            signal_df = load_signal(str(path), int(experiment_id))
-            channels = [c for c in signal_df.columns if c not in {EXPERIMENT_COL, "Time_[s]"}]
-            selected = st.multiselect("Channels", channels, default=channels[: min(3, len(channels))])
-            normalize = st.checkbox("Normalized comparison view", value=False)
-            st.plotly_chart(signal_plot(signal_df, selected, normalize), width="stretch")
-    with tabs[2]:
-        axis_key = AXIS_OPTIONS[st.radio("Geometry axis", list(AXIS_OPTIONS), horizontal=True, key="prep_axis")]
-        axis_col = axis_column(axis_key)
-        group_id = st.selectbox("Group ID", sorted(setup[GROUP_COL].astype(int)), key="geometry_group")
-        group_df = observed[observed[GROUP_COL].astype(int).eq(int(group_id))]
-        st.plotly_chart(
-            geometry_plot(group_df, axis_col, f"{axis_label(axis_key)} profiles for group {group_id}"),
-            width="stretch",
-        )
-
-
-def render_augmentation(data: dict[str, pd.DataFrame]) -> None:
-    setup = data["setup"]
-    axis_key = AXIS_OPTIONS[st.radio("Geometry axis", list(AXIS_OPTIONS), horizontal=True, key="aug_axis")]
-    axis_col = axis_column(axis_key)
-    group_id = st.selectbox("Bending setup group", sorted(setup[GROUP_COL].astype(int)), key="aug_group")
-    method = st.selectbox("Augmentation method", list(SOURCE_LABELS), format_func=lambda x: SOURCE_LABELS[x])
-    aug = load_augmented(method)
-    group_col = "group_id" if "group_id" in aug.columns else GROUP_COL
-    group_df = aug[aug[group_col].astype(int).eq(int(group_id))].copy()
-    if "Synthetic" in group_df:
-        real = group_df[~group_df["Synthetic"].astype(bool)]
-        synthetic = group_df[group_df["Synthetic"].astype(bool)]
-        keep_synth_ids = sorted(synthetic[EXPERIMENT_COL].dropna().unique())[:6]
-        plot_df = pd.concat([real, synthetic[synthetic[EXPERIMENT_COL].isin(keep_synth_ids)]])
-    else:
-        plot_df = group_df
-    st.plotly_chart(
-        geometry_plot(plot_df, axis_col, f"{SOURCE_LABELS[method]}: group {group_id}", synthetic_col="Synthetic"),
-        width="stretch",
-    )
-    st.markdown(
-        """
-        <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:0.65rem;margin-top:0.25rem">
-          <div class="metric-card" style="min-height:58px;padding:0.55rem 0.65rem">
-            <div class="value" style="font-size:1.05rem">315</div>
-            <div class="label" style="font-size:0.74rem">Real prepared profiles</div>
-          </div>
-          <div class="metric-card" style="min-height:58px;padding:0.55rem 0.65rem">
-            <div class="value" style="font-size:1.05rem">1,500</div>
-            <div class="label" style="font-size:0.74rem">Profiles per augmented dataset</div>
-          </div>
-          <div class="metric-card" style="min-height:58px;padding:0.55rem 0.65rem">
-            <div class="value" style="font-size:1.05rem">1,185</div>
-            <div class="label" style="font-size:0.74rem">Additional generated profiles</div>
-          </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    st.caption("Each augmentation strategy independently expands the dataset to 1,500 profiles; the two synthetic strategies are not one combined dataset.")
-
-
-def render_geometry_prediction(data: dict[str, pd.DataFrame]) -> None:
-    pred = load_sk_predictions()
-    metrics = load_sk_metrics()
-    rf_results = load_rf_results()
-    if pred.empty:
-        st.warning("No saved geometry-prediction detail artifact was found.")
-        return
-    axis_target = st.radio("Target", [MAIN_AXIS, SECONDARY_AXIS], horizontal=True, key="rf_axis")
-    groups = sorted(pred[pred["target"].eq(axis_target)][GROUP_COL].astype(int).unique())
-    group_id = st.selectbox("Group ID", groups, key="rf_group")
-    group_pred = pred[(pred["target"].eq(axis_target)) & (pred[GROUP_COL].astype(int).eq(int(group_id)))]
-    experiment_id = st.selectbox("Experiment", sorted(group_pred[EXPERIMENT_COL].astype(int).unique()), key="rf_exp")
-    exp = group_pred[group_pred[EXPERIMENT_COL].astype(int).eq(int(experiment_id))]
-    exp = exp[pd.to_numeric(exp["Angle[degree]"], errors="coerce").between(0, MAX_ANGLE)].copy()
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=exp["Angle[degree]"], y=exp["y_true"], mode="lines+markers", name="Measured", line=dict(color="#1f2937", width=3)))
-    fig.add_trace(go.Scatter(x=exp["Angle[degree]"], y=exp["y_pred_mean"], mode="lines", name="Predicted", line=dict(color="#2563eb", width=3, dash="dash")))
-    fig.update_layout(template="plotly_white", height=450, title="Measured vs predicted geometry", xaxis_title="Angle [degree]", yaxis_title=axis_target)
-    fig.update_xaxes(range=[0, MAX_ANGLE])
-    st.plotly_chart(fig, width="stretch")
-    if not metrics.empty:
-        st.dataframe(metrics[metrics["target"].eq(axis_target)], width="stretch", hide_index=True)
-    if not rf_results.empty:
-        row = rf_results.iloc[0]
-        st.caption(
-            f"RF thesis pipeline reference: Main-axis R2={row.get('r2_main'):.3f}, MAE={row.get('mae_main'):.4f} mm; "
-            f"Secondary-axis R2={row.get('r2_secondary'):.3f}, MAE={row.get('mae_secondary'):.4f} mm."
-        )
-
-
-def render_uncertainty() -> None:
-    st.markdown("#### QRF vs HGP prediction intervals")
-    c1, c2, c3 = st.columns([1, 1.4, 1.2])
-    axis_key = AXIS_OPTIONS[c1.selectbox("Geometry axis", list(AXIS_OPTIONS), key="uq_axis")]
-    source = c2.selectbox("Training data source", list(SOURCE_LABELS), format_func=lambda x: SOURCE_LABELS[x], key="uq_source")
-    qrf_pred, qrf_metrics = prediction_and_metrics("QRF", source, axis_key)
-    hgp_pred, hgp_metrics = prediction_and_metrics("HGP", source, axis_key)
-    group_options = sorted(set(qrf_pred.get(GROUP_COL, pd.Series(dtype=int)).dropna().astype(int)).union(set(hgp_pred.get(GROUP_COL, pd.Series(dtype=int)).dropna().astype(int))))
-    group_id = c3.selectbox("Evaluation group", group_options, index=0 if group_options else None, placeholder="No exported group")
-    if group_id is not None:
-        qrf_group = qrf_pred[qrf_pred[GROUP_COL].astype(int).eq(int(group_id))] if not qrf_pred.empty else pd.DataFrame()
-        hgp_group = hgp_pred[hgp_pred[GROUP_COL].astype(int).eq(int(group_id))] if not hgp_pred.empty else pd.DataFrame()
-        left, right = st.columns(2)
-        left.plotly_chart(prediction_interval_plot(qrf_group, "QRF", "Quantile Regression Forest"), width="stretch")
-        right.plotly_chart(prediction_interval_plot(hgp_group, "HGP", "Heteroscedastic Gaussian Process"), width="stretch")
-    metric_rows = []
-    for model, metrics in (("QRF", qrf_metrics), ("HGP", hgp_metrics)):
-        if metrics.empty:
+@st.cache_data(show_spinner=False)
+def pairwise_variability(axis_col: str) -> pd.DataFrame:
+    """Mean pairwise Euclidean distance between physical repetitions, per group."""
+    rows = []
+    for group_id, part in load_geometry("real").groupby(GROUP):
+        curves = part.pivot_table(index=EXP, columns=ANGLE, values=axis_col).dropna(axis=1).to_numpy()
+        if len(curves) < 2:
             continue
-        row = metrics.iloc[0].to_dict()
-        row["Model"] = model
-        metric_rows.append(row)
-    if metric_rows:
-        compare = pd.DataFrame(metric_rows)
-        cols = ["Model", "coverage_percent", "coverage_error_percent", "mean_interval_width", "mae", "rmse", "r2", "interval_score", "negative_log_predictive_density"]
-        visible = [c for c in cols if c in compare.columns]
-        st.dataframe(compare[visible].rename(columns=METRIC_LABELS), width="stretch", hide_index=True)
+        diff = curves[:, None, :] - curves[None, :, :]
+        dist = np.sqrt((diff**2).sum(axis=-1))[np.triu_indices(len(curves), k=1)]
+        rows.append({GROUP: group_id, "S_g": dist.mean(), "runs": len(curves)})
+    out = pd.DataFrame(rows)
+    return out.merge(load_setup()[[GROUP, *PARAMETERS]], on=GROUP)
 
 
-def render_variability(data: dict[str, pd.DataFrame]) -> None:
-    observed, setup = data["observed"], data["setup"]
-    axis_key = AXIS_OPTIONS[st.radio("Geometry axis", list(AXIS_OPTIONS), horizontal=True, key="var_axis")]
-    axis_col = axis_column(axis_key)
-    parameter = st.selectbox("Bending parameter", PROCESS_PARAMETERS, key="var_param")
-    group_id = st.selectbox("Group ID", sorted(setup[GROUP_COL].astype(int)), key="var_group")
-    group_df = observed[observed[GROUP_COL].astype(int).eq(int(group_id))]
-    st.plotly_chart(geometry_plot(group_df, axis_col, f"Physical repetitions in group {group_id}"), width="stretch")
-    distance = mean_pairwise_curve_distance(group_df, axis_col)
-    if distance is None:
-        st.info("This group has fewer than two complete physical repetitions, so pairwise variability is not estimable.")
-    else:
-        st.metric("Mean pairwise Euclidean distance", f"{distance:.3f}", "45-point geometry profiles")
-    assoc = variability_by_group(observed, setup, axis_col, parameter).dropna(subset=["mean_pairwise_distance", parameter])
-    fig = px.scatter(assoc, x=parameter, y="mean_pairwise_distance", size="n_experiments", hover_data=[GROUP_COL], template="plotly_white", title=f"Within-group variability vs {parameter}")
-    st.plotly_chart(fig, width="stretch")
-    ranking = load_ranking()
-    if not ranking.empty:
-        st.dataframe(ranking[ranking["geometry_type"].eq(axis_key)][["rank", "feature", "permutation_importance_mean", "rf_impurity_importance"]], width="stretch", hide_index=True)
+# ---------------------------------------------------------------------------
+# Plot helpers
+# ---------------------------------------------------------------------------
 
 
-WORKFLOW_STEPS = [
-    ("Data Preparation", "Explore the original TubeBEND dataset, sensor/process measurements, geometry representation, and preprocessing operations."),
-    ("Data Augmentation", "Explore synthetic geometry generation through sensor-based augmentation and within-group interpolation."),
-    ("Geometry Prediction", "Explore measured and predicted tube geometry using saved prediction artifacts and RF reference metrics."),
-    ("Uncertainty Estimation", "Compare Quantile Regression Forests and Heteroscedastic Gaussian Processes for prediction interval estimation."),
-]
+def rgba(hex_color: str, alpha: float) -> str:
+    h = hex_color.lstrip("#")
+    r, g, b = (int(h[i : i + 2], 16) for i in (0, 2, 4))
+    return f"rgba({r},{g},{b},{alpha})"
 
 
-def render_workflow(data: dict[str, pd.DataFrame]) -> None:
-    if "open_step" not in st.session_state:
-        st.session_state.open_step = 0
-    for i, (title, desc) in enumerate(WORKFLOW_STEPS):
-        st.markdown(
-            f'<div class="accordion-head"><span class="step-dot">{i + 1}</span><span class="step-title">{title}</span><div class="step-desc">{desc}</div></div>',
-            unsafe_allow_html=True,
-        )
-        if st.button(("Collapse" if st.session_state.open_step == i else "Open") + f" Step {i + 1}", key=f"step_button_{i}"):
-            st.session_state.open_step = i
-        if st.session_state.open_step == i:
-            if i == 0:
-                render_data_preparation(data)
-            elif i == 1:
-                render_augmentation(data)
-            elif i == 2:
-                render_geometry_prediction(data)
-            else:
-                render_uncertainty()
-
-
-def render_dataset_page(data: dict[str, pd.DataFrame]) -> None:
-    observed, setup = data["observed"], data["setup"]
-    cols = st.columns(4)
-    cols[0].metric("Experiments", observed[EXPERIMENT_COL].nunique())
-    cols[1].metric("Groups", setup[GROUP_COL].nunique())
-    cols[2].metric("Geometry rows", f"{len(observed):,}")
-    cols[3].metric("Measurement points", observed[ANGLE_COL].nunique())
-    st.dataframe(setup, width="stretch", hide_index=True)
-
-
-def render_results_page() -> None:
-    metric_df = collect_uncertainty_metrics()
-    if metric_df.empty:
-        st.warning("No uncertainty metrics were found.")
-        return
-    common_metrics = []
-    for metric in METRIC_LABELS:
-        if metric not in metric_df.columns:
-            continue
-        complete_for_both_models = (
-            metric_df
-            .dropna(subset=[metric])
-            .groupby(["Training data", "Axis"])["Model"]
-            .agg(lambda values: {"QRF", "HGP"}.issubset(set(values)))
-        )
-        if not complete_for_both_models.empty and bool(complete_for_both_models.all()):
-            common_metrics.append(metric)
-
-    if not common_metrics:
-        st.warning("No metric is available for both QRF and HGP across the exported result groups.")
-        return
-
-    metric = st.selectbox(
-        "Result metric",
-        common_metrics,
-        format_func=lambda x: METRIC_LABELS[x],
+def kpi(column, label: str, value: str, note: str = "", note_class: str = "") -> None:
+    column.markdown(
+        f'<div class="tb-kpi"><div class="l">{label}</div><div class="v">{value}</div>'
+        f'<div class="n {note_class}">{note}</div></div>',
+        unsafe_allow_html=True,
     )
-    plot_df = metric_df.dropna(subset=[metric]).copy()
+
+
+def add_profiles(fig, df, axis_col, color, row=None, col=None, width=1.6, dash="solid", name=None, legend=False):
+    for i, (exp_id, part) in enumerate(df.groupby(EXP)):
+        part = part.sort_values(ANGLE)
+        fig.add_trace(
+            go.Scatter(
+                x=part[ANGLE], y=part[axis_col], mode="lines",
+                line=dict(color=color, width=width, dash=dash),
+                name=name or f"Experiment {exp_id}", legendgroup=name,
+                showlegend=legend and i == 0,
+                hovertemplate=f"Experiment {exp_id}<br>angle %{{x}}<br>%{{y:.3f}} mm<extra></extra>",
+            ),
+            row=row, col=col,
+        )
+
+
+def add_interval(fig, pred, model, row, col, legend):
+    summary = pred.groupby(ANGLE)[["y_lower", "y_upper", "y_center"]].mean().reset_index()
+    color = MODELS[model]["color"]
+    fig.add_trace(
+        go.Scatter(
+            x=pd.concat([summary[ANGLE], summary[ANGLE][::-1]]),
+            y=pd.concat([summary["y_upper"], summary["y_lower"][::-1]]),
+            fill="toself", fillcolor=rgba(color, 0.18), line=dict(width=0),
+            name=f"{model} 90% interval", legendgroup=f"{model}-band", showlegend=legend, hoverinfo="skip",
+        ),
+        row=row, col=col,
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=summary[ANGLE], y=summary["y_center"], mode="lines", line=dict(color=color, width=2.5),
+            name=f"{model} prediction", legendgroup=f"{model}-line", showlegend=legend,
+            hovertemplate=f"{model}<br>angle %{{x}}<br>%{{y:.3f}} mm<extra></extra>",
+        ),
+        row=row, col=col,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Sections
+# ---------------------------------------------------------------------------
+
+
+def render_overview(metrics: pd.DataFrame) -> None:
+    setup, real = load_setup(), load_geometry("real")
+    rf = load_rf_summary()
+
+    k = st.columns(5)
+    kpi(k[0], "Bending experiments", f"{real[EXP].nunique()}", f"{setup[GROUP].nunique()} nominal setup groups")
+    kpi(k[1], "Experiments per group", "1 – 6", "few physical repetitions")
+    kpi(k[2], "Profile resolution", f"{real[ANGLE].nunique()} points", "Main + Secondary axis")
+    if rf:
+        kpi(k[3], "RF geometry R² (Main / Sec.)", f"{rf['r2_main']:.3f} / {rf['r2_secondary']:.3f}",
+            f"held-out groups: {rf['test_r2_main']:.2f} / {rf['test_r2_secondary']:.2f}")
+    n_aug = load_geometry(INTERP_KEY)[EXP].nunique()
+    kpi(k[4], "Profiles after augmentation", f"{n_aug:,}", f"+{n_aug - real[EXP].nunique():,} synthetic per strategy")
+    st.write("")
+
+    st.markdown("#### Coverage vs. interval width — every model and training source at a glance")
     st.caption(
-        "Each bar is evaluated against the held-out measured geometry. "
-        "The x-axis shows the training data source; colors distinguish geometry axes."
+        "Each point is one model trained on one data source and evaluated on held-out setup groups. "
+        "A good interval sits **on the 90% line and as far left as possible** (calibrated and sharp)."
     )
-    colors = {
-        "Main-axis": "#2563eb",
-        "Secondary-axis": "#14b8a6",
-    }
-    left, right = st.columns(2)
-    for model, column in [("QRF", left), ("HGP", right)]:
-        model_df = plot_df[plot_df["Model"].eq(model)].copy()
-        fig = px.bar(
-            model_df,
-            x="Training data",
-            y=metric,
-            color="Axis",
-            barmode="group",
-            template="plotly_white",
-            title=f"{model} - {METRIC_LABELS[metric]}",
-            color_discrete_map=colors,
-        )
+    fig = make_subplots(
+        rows=1, cols=2, horizontal_spacing=0.08,
+        subplot_titles=[f"{name} · held out {a['held_out']}" for name, a in AXES.items()],
+    )
+    for c, axis_name in enumerate(AXES, start=1):
+        fig.add_hline(y=NOMINAL, line=dict(color="#94a3b8", dash="dot"), row=1, col=c)
+        part = metrics[metrics["Axis"].eq(axis_name)]
+        for _, r in part.iterrows():
+            fig.add_trace(
+                go.Scatter(
+                    x=[r["Mean PI width [mm]"]], y=[r["Coverage [%]"]], mode="markers",
+                    marker=dict(
+                        size=16, color=SOURCES[r["source"]]["color"], symbol=MODELS[r["Model"]]["symbol"],
+                        line=dict(color="white", width=1.5),
+                    ),
+                    name=f"{r['Model']} · {r['Training data']}", legendgroup=f"{r['Model']}{r['source']}",
+                    showlegend=c == 1,
+                    hovertemplate=(
+                        f"<b>{r['Model']} · {r['Training data']}</b><br>coverage %{{y:.1f}}%<br>"
+                        f"width %{{x:.3f}} mm<br>MAE {r['MAE [mm]']:.3f} mm<extra></extra>"
+                    ),
+                ),
+                row=1, col=c,
+            )
+        fig.update_xaxes(title_text="Mean interval width [mm]  (narrower →  better)", row=1, col=c)
+    fig.update_yaxes(title_text="Empirical coverage [%]", row=1, col=1)
+    fig.update_layout(height=430, margin=dict(t=90), legend=dict(y=1.14))
+    st.plotly_chart(fig, width="stretch", config=PLOT_CONFIG)
+
+
+def render_data(axis_name: str, group_id: int) -> None:
+    axis = AXES[axis_name]
+    setup, real = load_setup(), load_geometry("real")
+    group = real[real[GROUP].eq(group_id)]
+
+    left, right = st.columns([2, 1])
+    with left:
+        fig = go.Figure()
+        add_profiles(fig, group, axis["col"], rgba(MEASURED, 0.75), name="Physical repetition", legend=True)
+        mean = group.groupby(ANGLE)[axis["col"]].mean()
+        fig.add_trace(go.Scatter(x=mean.index, y=mean.values, mode="lines", name="Group mean",
+                                 line=dict(color="#2563eb", width=3, dash="dash")))
         fig.update_layout(
-            height=430,
-            margin=dict(l=10, r=10, t=58, b=10),
-            legend_title_text="Geometry axis",
-            yaxis_title=METRIC_LABELS[metric],
-            xaxis_title="Training data source",
+            title=f"Group {group_id}: {group[EXP].nunique()} physical repetitions of the same nominal setup",
+            height=420, xaxis_title="Measurement position (angle / distance)", yaxis_title=axis["col"],
+            margin=dict(t=90), legend=dict(y=1.04),
         )
-        fig.update_xaxes(tickangle=-30)
-        column.plotly_chart(fig, width="stretch")
+        st.plotly_chart(fig, width="stretch", config=PLOT_CONFIG)
+    with right:
+        row = setup[setup[GROUP].eq(group_id)].iloc[0]
+        st.markdown("**Bending setup of this group**")
+        st.dataframe(
+            pd.DataFrame({"Parameter": PARAMETERS, "Value": [row[p] for p in PARAMETERS]}),
+            hide_index=True, width="stretch",
+        )
+        sizes = real.groupby(GROUP)[EXP].nunique()
+        dist = sizes.value_counts().sort_index()
+        fig = go.Figure(go.Bar(
+            x=dist.index, y=dist.values, text=dist.values, textposition="outside",
+            marker_color=["#2563eb" if n == sizes[group_id] else "#cbd5e1" for n in dist.index],
+            hovertemplate="%{y} groups with %{x} experiments<extra></extra>",
+        ))
+        fig.update_layout(title=f"Experiments per setup group (this group: {sizes[group_id]})", height=240,
+                          margin=dict(t=40), xaxis=dict(dtick=1, title=None),
+                          yaxis=dict(visible=False, range=[0, dist.max() * 1.25]))
+        st.plotly_chart(fig, width="stretch", config=PLOT_CONFIG)
+
+    first_run = int(group[EXP].min())
+    st.markdown(f"#### Process signals recorded during experiment {first_run}")
+    st.caption("The 12 machine-torque and movement channels whose statistical features feed the geometry models.")
+    signals = load_signals(first_run)
+    labels = {**SIGNALS["machine"], **SIGNALS["movement"]}
+    fig = make_subplots(rows=3, cols=4, shared_xaxes=True, vertical_spacing=0.09, horizontal_spacing=0.05,
+                        subplot_titles=list(labels.values()))
+    for i, (column, label) in enumerate(labels.items()):
+        color = "#2563eb" if column in SIGNALS["machine"] else "#0d9488"
+        fig.add_trace(go.Scatter(x=signals.index, y=signals[column], mode="lines", line=dict(color=color, width=1.4),
+                                 showlegend=False, hovertemplate=f"{label}<br>t=%{{x:.1f}} s<br>%{{y:.2f}}<extra></extra>"),
+                      row=i // 4 + 1, col=i % 4 + 1)
+    fig.update_annotations(font_size=12)
+    fig.update_xaxes(title_text="Time [s]", row=3)
+    fig.update_layout(height=560, margin=dict(t=40))
+    st.plotly_chart(fig, width="stretch", config=PLOT_CONFIG)
+
+
+def render_augmentation(axis_name: str, group_id: int) -> None:
+    axis = AXES[axis_name]
+    st.caption(
+        "Both strategies fill every group up to 15 profiles using the trained Random Forest geometry models. "
+        "Dark lines are physical experiments, coloured lines are generated profiles."
+    )
+    fig = make_subplots(rows=1, cols=3, shared_yaxes=True, horizontal_spacing=0.03,
+                        subplot_titles=[s["label"] for s in SOURCES.values()])
+    for c, (source, meta) in enumerate(SOURCES.items(), start=1):
+        df = load_geometry(source)
+        df = df[df[GROUP].eq(group_id)]
+        add_profiles(fig, df[df["synthetic"]], axis["col"], rgba(meta["color"], 0.55), 1, c, width=1.2,
+                     name="Generated profile", legend=c == 2)
+        add_profiles(fig, df[~df["synthetic"]], axis["col"], MEASURED, 1, c, width=2,
+                     name="Physical experiment", legend=c == 1)
+    fig.update_xaxes(title_text="Measurement position")
+    fig.update_yaxes(title_text=axis["col"], col=1)
+    fig.update_layout(height=420, margin=dict(t=100), legend=dict(y=1.16))
+    st.plotly_chart(fig, width="stretch", config=PLOT_CONFIG)
+
+    st.markdown("#### Generated profiles are less variable than physical repetitions")
+    left, right = st.columns([2, 1])
+    spreads = {s: within_group_spread(s, axis["col"]) for s in SOURCES}
+    with left:
+        fig = go.Figure()
+        for source, values in spreads.items():
+            meta = SOURCES[source]
+            fig.add_trace(go.Box(
+                y=values.values, name=meta["label"], marker_color=meta["color"], boxmean=True,
+                boxpoints="outliers", line=dict(width=1.5), fillcolor=rgba(meta["color"], 0.18),
+                customdata=values.index, hovertemplate="Group %{customdata}<br>%{y:.4f} mm<extra></extra>",
+            ))
+        fig.update_layout(height=360, showlegend=False, yaxis_title="Mean within-group std [mm]",
+                          title=f"{axis_name}: spread per setup group (one value per group)")
+        st.plotly_chart(fig, width="stretch", config=PLOT_CONFIG)
+    with right:
+        base = spreads["real"].mean()
+        st.write("")
+        kpi(st, "Physical repetitions", f"{base:.4f} mm", "mean within-group std (reference)")
+        for source in (INTERP_KEY, SENSOR_KEY):
+            value = spreads[source].mean()
+            st.write("")
+            kpi(st, SOURCES[source]["label"], f"{value:.4f} mm", f"{100 * (value / base - 1):+.0f}% spread vs real", "good")
+
+
+def render_intervals(axis_name: str, group_id: int, metrics: pd.DataFrame) -> None:
+    axis = AXES[axis_name]
+    st.caption(
+        f"Test groups contain a setting never seen in training (**{axis['held_out']}**). "
+        f"Bands are the 90% prediction intervals for group {group_id}; dark lines are its measured experiments. "
+        "Panel titles give the share of measured points inside the band for this group."
+    )
+    titles, panels = [], []
+    for model in MODELS:
+        for source, meta in SOURCES.items():
+            pred = load_predictions(model, source, axis["key"], axis["split"])
+            pred = pred[pred[GROUP].eq(group_id) & pred[EXP].lt(SYNTHETIC_ID_START)] if not pred.empty else pred
+            inside = ((pred["y_true"] >= pred["y_lower"]) & (pred["y_true"] <= pred["y_upper"])).mean() * 100 \
+                if not pred.empty else float("nan")
+            titles.append(f"<b>{model}</b> · {meta['label']} — {inside:.0f}% inside")
+            panels.append((model, pred))
+
+    fig = make_subplots(rows=2, cols=3, shared_xaxes=True, shared_yaxes="all",
+                        horizontal_spacing=0.03, vertical_spacing=0.1, subplot_titles=titles)
+    for i, (model, pred) in enumerate(panels):
+        r, c = i // 3 + 1, i % 3 + 1
+        if pred.empty:
+            continue
+        add_interval(fig, pred, model, r, c, legend=c == 1)
+        measured = pred.rename(columns={"y_true": "measured"})
+        add_profiles(fig, measured, "measured", rgba(MEASURED, 0.7), r, c, width=1.4,
+                     name="Measured experiment", legend=i == 0)
+    fig.update_annotations(font_size=12)
+    fig.update_xaxes(title_text="Measurement position", row=2)
+    fig.update_yaxes(range=[21, 23])
+    fig.update_yaxes(title_text=axis["col"], col=1)
+    fig.update_layout(height=620, margin=dict(t=80), legend=dict(y=1.08))
+    st.plotly_chart(fig, width="stretch", config=PLOT_CONFIG)
+
+    st.markdown(f"#### {axis_name}: all held-out test groups")
+    table = metrics[metrics["Axis"].eq(axis_name)].drop(columns=["Axis", "source"]).reset_index(drop=True)
+    lower_is_better = [c for c in table.columns if c not in ("Model", "Training data", "Coverage [%]")]
+    styled = (
+        table.style.format(precision=3)
+        .format({"Coverage [%]": "{:.1f}", "Calibration error [pp]": "{:.1f}"})
+        .highlight_min(subset=lower_is_better, props="background-color:#dcfce7;font-weight:600")
+    )
+    st.dataframe(styled, hide_index=True, width="stretch")
+    st.caption("Green = best value in the column. Calibration error is |coverage − 90|. "
+               "QRF NLPD uses a Gaussian approximation of the 90% interval (thesis Eq. 4.1).")
+
+
+def render_variability(axis_name: str) -> None:
+    axis = AXES[axis_name]
+    ranking = pd.Series(VARIABILITY_RANKING[axis["key"]]).sort_values()
+    left, right = st.columns([1, 1.4])
+    with left:
+        fig = go.Figure(go.Bar(
+            x=ranking.values, y=ranking.index, orientation="h",
+            marker_color=["#2563eb" if v == ranking.max() else "#94a3b8" for v in ranking.values],
+            text=[f"{v:.4f}" for v in ranking.values], textposition="outside", cliponaxis=False,
+            hovertemplate="%{y}: %{x:.5f}<extra></extra>",
+        ))
+        fig.update_layout(height=380, title="Which parameter predicts repeatability?",
+                          xaxis=dict(title="Permutation importance (Δ MAE)", range=[min(0, ranking.min()) - 0.004,
+                                                                                     ranking.max() * 1.25]))
+        st.plotly_chart(fig, width="stretch", config=PLOT_CONFIG)
+        st.caption("Held-out permutation importance of a Random Forest predicting within-group variability "
+                   "from the six setup parameters (thesis Table 4.20).")
+    with right:
+        parameter = st.pills(
+            "Bending parameter", PARAMETERS, default=ranking.index[-1], key=f"param_{axis['key']}",
+            label_visibility="collapsed",
+        ) or ranking.index[-1]
+        data = pairwise_variability(axis["col"])
+        fig = go.Figure()
+        levels = sorted(data[parameter].unique())
+        for level in levels:
+            values = data[data[parameter].eq(level)]
+            fig.add_trace(go.Box(
+                y=values["S_g"], name=f"{level:g}", boxpoints="all", jitter=0.4, pointpos=0,
+                marker=dict(color="#2563eb", size=6, opacity=0.6), line=dict(color="#334155", width=1.2),
+                fillcolor="rgba(0,0,0,0)", customdata=values[[GROUP, "runs"]],
+                hovertemplate="Group %{customdata[0]} (%{customdata[1]} experiments)<br>S_g = %{y:.3f} mm<extra></extra>",
+            ))
+        fig.update_layout(height=340, showlegend=False, title=f"Variability across levels of {parameter}",
+                          xaxis_title=parameter, yaxis_title="Mean pairwise distance S_g [mm]",
+                          xaxis_type="category")
+        st.plotly_chart(fig, width="stretch", config=PLOT_CONFIG)
+        st.caption(
+            f"Each dot is one setup group (physical experiments only). Adjusted relationship with variability on the "
+            f"{axis_name}: **{VARIABILITY_DIRECTION[axis['key']][parameter]}** (thesis Table 4.21)."
+        )
+
+
+# ---------------------------------------------------------------------------
+# Layout
+# ---------------------------------------------------------------------------
 
 
 def main() -> None:
-    inject_css()
-    nav = sidebar()
-    header()
-    data = load_base_data()
-    if nav == "Workflow":
-        render_workflow(data)
-    elif nav == "Dataset":
-        render_dataset_page(data)
-    else:
-        render_results_page()
+    st.markdown(
+        '<div class="tb-title">Uncertainty-Aware Prediction Intervals for Rotary Tube Bending</div>'
+        '<div class="tb-sub">Master thesis · Soroor Eskandari Khorram Abadi · University of Siegen, Ubicomp · '
+        'TubeBEND dataset</div>',
+        unsafe_allow_html=True,
+    )
+    c1, c2, _ = st.columns([1.1, 1.1, 3], vertical_alignment="bottom")
+    axis_name = c1.segmented_control("Geometry axis", list(AXES), default=list(AXES)[0], key="axis") \
+        or list(AXES)[0]
+    axis = AXES[axis_name]
+    test_groups = sorted(load_predictions("QRF", "real", axis["key"], axis["split"])[GROUP].unique())
+    runs = load_geometry("real").groupby(GROUP)[EXP].nunique()
+    if st.session_state.get("group") not in test_groups:
+        st.session_state["group"] = 43 if 43 in test_groups else test_groups[0]
+    group_id = c2.selectbox(
+        "Test setup group", test_groups, key="group",
+        format_func=lambda g: f"Group {g} · {runs.get(g, 0)} experiments",
+        help=f"Groups held out for evaluation ({axis['held_out']}). Used by every tab.",
+    )
+
+    metrics = load_metrics()
+    tabs = st.tabs(["Overview", "1 · Data", "2 · Augmentation", "3 · Prediction intervals", "4 · Variability"])
+    with tabs[0]:
+        render_overview(metrics)
+    with tabs[1]:
+        render_data(axis_name, int(group_id))
+    with tabs[2]:
+        render_augmentation(axis_name, int(group_id))
+    with tabs[3]:
+        render_intervals(axis_name, int(group_id), metrics)
+    with tabs[4]:
+        render_variability(axis_name)
 
 
-if __name__ == "__main__":
-    main()
+main()
